@@ -263,6 +263,12 @@ bacnet_proxy_dict_template = lambda interface_ip_address: {
     "object_id": 648
 }
 
+bacnet_interface_template = lambda interface_ip_address: {
+    "local_interface": f"{interface_ip_address}/24",
+    "device_id": 648,
+    "time_synchronization_interval": 1440
+}
+
 historian_dict_template = lambda db_name, db_user, db_password, db_address, db_port: {
     "connection": {
         "type": "postgresql",
@@ -308,10 +314,9 @@ platform_config_dict_template = lambda devices_block, manager_agents_block, ilc_
     },
     "agents": {
         "listener": {"source": "$VOLTTRON_ROOT/examples/ListenerAgent", "tag": "listener"},
-        "platform.bacnet_proxy": {"source": "$VOLTTRON_ROOT/services/core/BACnetProxy",
-                                  "config": "$CONFIG/bacnet_proxy.config", "priority": "10"},
+
         "platform.driver": {
-            "source": "$VOLTTRON_ROOT/services/core/PlatformDriverAgent",
+            "source": "/code/volttron-platform-driver",
             "tag": "driver",
             "config_store": {
                 "registry_configs/schneider.csv": {
@@ -322,11 +327,13 @@ platform_config_dict_template = lambda devices_block, manager_agents_block, ilc_
                     "file": "$CONFIG/configuration_store/platform.driver/registry_configs/schneider_oat.csv",
                     "type": "--csv"
                 },
+                "interfaces/bacnet": {
+                    "file": "$CONFIG/bacnet.config",
+                },
                 **devices_block
             }
         },
         **manager_agents_block,
-        "platform.actuator": {"source": "$VOLTTRON_ROOT/services/core/ActuatorAgent", "tag": "actuator"},
         "platform.historian": {"source": "$VOLTTRON_ROOT/services/core/SQLHistorian",
                                "config": "$CONFIG/historian.config", "tag": "historian"},
         "platform.topic_watcher": {"source": "$VOLTTRON_ROOT/services/ops/TopicWatcher",
@@ -339,6 +346,11 @@ platform_config_dict_template = lambda devices_block, manager_agents_block, ilc_
     "ilc": ilc_block
 }
 
+bacnet_proxy_agent_block = {
+    "platform.bacnet_proxy": {"source": "$VOLTTRON_ROOT/services/core/BACnetProxy",
+                              "config": "$CONFIG/bacnet_proxy.config", "priority": "10"},
+    "platform.actuator": {"source": "$VOLTTRON_ROOT/services/core/ActuatorAgent", "tag": "actuator"},
+}
 
 def get_gateway_prefix(address: str) -> str:
     return '.'.join(address.split('.')[:-1])
@@ -374,12 +386,22 @@ def generate_platform_config_driver_device_block(num_configs: int, prefix: str, 
         devices_block.update(DEVICE_BLOCK_DICT(campus, building, device_name))
     return devices_block
 
+def generate_platform_config_bacnet_proxy(platform_config):
+    platform_config['agents'].update(bacnet_proxy_agent_block)
+    platform_config['agents']['platform.driver']['source'] = "$VOLTTRON_ROOT/services/core/PlatformDriverAgent"
+    return platform_config
 
-def generate_platform_config(num_configs: int, output_dir: str | bytes, prefix, campus, building, gateway_address, generate_ilc):
+
+def generate_platform_config(num_configs: int, output_dir: str | bytes,
+                             prefix: str, campus: str,
+                             building, gateway_address: str,
+                             bacnet_deployment: str,  generate_ilc: bool):
     manager_agents_block = generate_platform_config_manager_agent_block(num_configs, prefix, campus, building)
     devices_block = generate_platform_config_driver_device_block(num_configs, prefix, campus, building)
     ilc_block = {"agent.ilc": {"source": "$ILC", "tag": "ilc"}} if generate_ilc else {}
     platform_config = platform_config_dict_template(devices_block, manager_agents_block, ilc_block)
+    if bacnet_deployment == 'proxy':
+        platform_config = generate_platform_config_bacnet_proxy(platform_config)
     with open(os.path.join(output_dir, 'platform_config.yml'), 'w') as f:
         yaml.dump(platform_config, f, sort_keys=False)
 
@@ -460,9 +482,12 @@ def generate_bacnet_proxy_config(gateway_address: str, output_dir: str | bytes):
     if interface_ip_address is None:
         raise ValueError('IP address is not found!  Verify gateway address')
     proxy_config = bacnet_proxy_dict_template(interface_ip_address)
+    interface_config = bacnet_interface_template(interface_ip_address)
     bacnet_output_dir = Path(output_dir)
     with open(bacnet_output_dir / 'bacnet_proxy.config', 'w') as _file:
         json.dump(proxy_config, _file, indent=4)
+    with open(bacnet_output_dir / 'bacnet.config', 'w') as _file:
+        json.dump(interface_config, _file, indent=4)
 
 
 def generate_historian_config(db_name: str, db_user: str, db_password: str,
@@ -520,6 +545,7 @@ def main():
     parser.add('--from-address', type=str, default='no-reply@aems.pnl.gov')
     parser.add('--to-addresses', action='append', help='A list of notify email addresses.', default=[])
     parser.add('--allow-frequency-minutes', type=int, default=60)
+    parser.add('--bacnet', type=str, default='driver')
 
 
     args = parser.parse_args()
@@ -535,7 +561,7 @@ def main():
 
 
     bacnet_network = args.bacnet_address if args.bacnet_address is not None else args.gateway_address
-
+    bacnet_deployment = args.bacnet if args.bacnet in ["driver", "proxy"] else "driver"
     # Generate device configs
     generate_platform_driver_configs(
         num_configs=args.num_configs,
@@ -575,7 +601,7 @@ def main():
     # Generate platform config (with optional ILC agent)
     generate_platform_config(args.num_configs, output_path, args.prefix,
                              args.campus, args.building, args.gateway_address,
-                             generate_ilc=args.generate_ilc)
+                             bacnet_deployment, generate_ilc=args.generate_ilc)
 
     shutil.copy('docker-compose-aems.yml', os.path.join(output_path, 'docker-compose-aems.yml'))
     shutil.copy('docker-compose-ilc.yml', os.path.join(output_path, 'docker-compose-ilc.yml'))
